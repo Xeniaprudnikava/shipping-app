@@ -1,24 +1,32 @@
-// Положите этот файл в корень вашего проекта: /api/calcShipping.js
+// file: api/calcShipping.js
+// (на Vercel этот файл лежит в папке /api и автоматически превращается в endpoint
+//   https://shipping-app-ecru.vercel.app/api/calcShipping)
 
 export default async function handler(req, res) {
-  // --- CORS ---
+  // 1) CORS-заголовки — разрешаем запросы с любого источника (или укажите ваш домен вместо '*')
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  
+  // 2) Опция preflight
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // --- Только POST ---
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   const { region, boxes } = req.body;
-  const token = process.env.SHIPX_TOKEN;      // добавьте его в Settings → Env Variables
-  const orgId = process.env.SHIPX_ORG_ID;     // тоже в Env Variables
+  if (!region || !boxes || !Number.isInteger(boxes) || boxes < 1) {
+    return res.status(400).json({ error: 'Nieprawidłowe dane' });
+  }
 
-  // Простейший маппинг названий регионов → ISO
+  // 3) Ваш статический token из InPost → сохраните его в ENV переменной Vercel, 
+  //    например SHIPX_TOKEN и ниже замените process.env.SHIPX_TOKEN
+  const SHIPX_TOKEN = process.env.SHIPX_TOKEN || 'ВАШ_ТОКЕН_ИЗ_INPOST_ЗДЕСЬ';
+
+  // 4) Маппинг регионов
   const countryCodes = {
     Polska: 'PL',
     Niemcy: 'DE',
@@ -27,43 +35,46 @@ export default async function handler(req, res) {
     Włochy: 'IT',
     'Wielka Brytania': 'GB'
   };
-  const code = countryCodes[region];
-  if (!code || !Number.isInteger(boxes) || boxes < 1) {
-    return res.status(400).json({ error: 'Invalid region or boxes' });
+  const country_code = countryCodes[region];
+  if (!country_code) {
+    return res.status(400).json({ error: 'Bad region' });
   }
 
-  // Собираем shipments
+  // 5) Собираем shipments
   const shipments = Array.from({ length: boxes }, (_, i) => ({
-    id: `BOX${i + 1}`,
-    receiver: { address: { country_code: code } },
+    id: `BOX${i+1}`,
+    receiver: { address: { country_code } },
     parcels: {
       dimensions: { length: '39', width: '38', height: '64', unit: 'cm' },
-      weight:     { amount: '1', unit: 'kg' }
+      weight:     { amount: '1',  unit: 'kg' }
     },
     service: 'inpost_locker_standard'
   }));
 
-  // Запрашиваем расчёт
-  const resp = await fetch(
-    `https://api-shipx-eu.easypack24.net/v1/organizations/${orgId}/shipments/calculate`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ shipments })
-    }
-  );
-  if (!resp.ok) {
-    const text = await resp.text();
-    return res.status(500).json({ error: text });
+  // 6) Запрашиваем расчёт
+  let offers;
+  try {
+    const calcRes = await fetch(
+      `https://api-shipx-eu.easypack24.net/v1/organizations/${process.env.SHIPX_ORGANIZATION_ID}/shipments/calculate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${SHIPX_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ shipments })
+      }
+    );
+    if (!calcRes.ok) throw new Error(`status ${calcRes.status}`);
+    offers = await calcRes.json();
+  } catch (e) {
+    console.error('Error on ShipX calculate:', e);
+    return res.status(500).json({ error: 'ShipX error' });
   }
-  const offers = await resp.json();
 
-  // Суммируем
+  // 7) Суммируем
   const shippingCost = offers
     .reduce((sum, o) => sum + parseFloat(o.calculated_charge_amount || 0), 0);
 
-  res.status(200).json({ shippingCost });
+  return res.status(200).json({ shippingCost });
 }

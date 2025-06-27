@@ -2,35 +2,37 @@
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  // 1) CORS preflight
+  // === 1) CORS ===
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  // отвечаем на preflight-запрос
   if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     return res.status(204).end();
   }
 
-  // 2) Только POST
+  // обрабатываем только POST
   if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST, OPTIONS');
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // 3) Разрешаем запросы из любых доменов (или замените '*' на конкретный URL tilda)
-  res.setHeader('Access-Control-Allow-Origin', '*');
-
+  // === 2) читаем тело запроса ===
   const { region, boxes } = req.body;
-  const orgId = process.env.SHIPX_ORGANIZATION_ID;
-  const token = process.env.SHIPX_TOKEN;
-
-  if (!orgId || !token) {
-    return res.status(500).json({ error: 'Missing environment variables' });
-  }
   if (!region || !Number.isInteger(boxes) || boxes < 1) {
-    return res.status(400).json({ error: 'Invalid region or boxes' });
+    return res.status(400).json({ error: 'Nieprawidłowe dane' });
   }
 
-  // 4) Маппинг региона в ISO-код
+  // === 3) статический токен ShipX ===
+  // Сгенерируйте в личном кабинете InPost → API ShipX → "Показать токен"
+  // Добавьте его в Settings → Environment Variables на Vercel:
+  //   INPOST_TOKEN = eyJhbGciOiJ…<ваш токен>
+  const token = process.env.INPOST_TOKEN;
+  if (!token) {
+    return res.status(500).json({ error: 'Missing INPOST_TOKEN' });
+  }
+
+  // === 4) маппинг регионов на коды ===
   const countryCodes = {
     Polska: 'PL',
     Niemcy: 'DE',
@@ -41,10 +43,10 @@ export default async function handler(req, res) {
   };
   const code = countryCodes[region];
   if (!code) {
-    return res.status(400).json({ error: 'Unknown region' });
+    return res.status(400).json({ error: 'Nieznany region' });
   }
 
-  // 5) Собираем массив отправлений
+  // === 5) собираем shipments ===
   const shipments = Array.from({ length: boxes }, (_, i) => ({
     id: `BOX${i + 1}`,
     receiver: { address: { country_code: code } },
@@ -55,9 +57,9 @@ export default async function handler(req, res) {
     service: 'inpost_locker_standard'
   }));
 
-  // 6) Запрос расчёта
+  // === 6) запрос расчёта ===
   const calcRes = await fetch(
-    `https://api-shipx-eu.easypack24.net/v1/organizations/${orgId}/shipments/calculate`,
+    `https://api-shipx-eu.easypack24.net/v1/organizations/${process.env.SHIPX_ORGANIZATION_ID}/shipments/calculate`,
     {
       method: 'POST',
       headers: {
@@ -69,14 +71,14 @@ export default async function handler(req, res) {
   );
   if (!calcRes.ok) {
     const err = await calcRes.text();
-    return res.status(calcRes.status).json({ error: err });
+    return res.status(502).json({ error: 'ShipX error', details: err });
   }
   const offers = await calcRes.json();
 
-  // 7) Суммируем стоимость
+  // === 7) суммируем ===
   const shippingCost = offers
     .reduce((sum, o) => sum + parseFloat(o.calculated_charge_amount || 0), 0);
 
-  // 8) Отдаём ответ
-  return res.status(200).json({ shippingCost });
+  // === 8) отдаем клиенту ===
+  res.status(200).json({ shippingCost });
 }

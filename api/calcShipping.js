@@ -1,38 +1,24 @@
 // api/calcShipping.js
-import fetch from 'node-fetch';
-
+// ——————————————————————————————————————————————————————————
+// Обрабатываем CORS, чтобы запросы из fyk.bar не блокировались:
 export default async function handler(req, res) {
-  // === 1) CORS ===
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  // отвечаем на preflight-запрос
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'OPTIONS,POST')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
   if (req.method === 'OPTIONS') {
-    return res.status(204).end();
+    return res.status(200).end()
   }
 
-  // обрабатываем только POST
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
+  // Пришло тело вида { region: "Polska", boxes: 2 }
+  const { region, boxes } = req.body
+  if (!region || !boxes || boxes < 1) {
+    return res.status(400).json({ error: 'Invalid payload' })
   }
 
-  // === 2) читаем тело запроса ===
-  const { region, boxes } = req.body;
-  if (!region || !Number.isInteger(boxes) || boxes < 1) {
-    return res.status(400).json({ error: 'Nieprawidłowe dane' });
-  }
+  // Статический токен из InPost, сгенеренный в личном кабинете
+  const TOKEN = process.env.SHIPX_TOKEN || 'YOUR_STATIC_TOKEN'
 
-  // === 3) статический токен ShipX ===
-  // Сгенерируйте в личном кабинете InPost → API ShipX → "Показать токен"
-  // Добавьте его в Settings → Environment Variables на Vercel:
-  //   INPOST_TOKEN = eyJhbGciOiJ…<ваш токен>
-  const token = process.env.INPOST_TOKEN;
-  if (!token) {
-    return res.status(500).json({ error: 'Missing INPOST_TOKEN' });
-  }
-
-  // === 4) маппинг регионов на коды ===
+  // Маппинг регионов
   const countryCodes = {
     Polska: 'PL',
     Niemcy: 'DE',
@@ -40,45 +26,45 @@ export default async function handler(req, res) {
     Holandia: 'NL',
     Włochy: 'IT',
     'Wielka Brytania': 'GB'
-  };
-  const code = countryCodes[region];
-  if (!code) {
-    return res.status(400).json({ error: 'Nieznany region' });
+  }
+  const country_code = countryCodes[region]
+  if (!country_code) {
+    return res.status(400).json({ error: 'Unknown region' })
   }
 
-  // === 5) собираем shipments ===
+  // Формируем запрос на расчёт
   const shipments = Array.from({ length: boxes }, (_, i) => ({
-    id: `BOX${i + 1}`,
-    receiver: { address: { country_code: code } },
+    id: `BOX${i+1}`,
+    receiver: { address: { country_code } },
     parcels: {
       dimensions: { length: '39', width: '38', height: '64', unit: 'cm' },
       weight:     { amount: '1', unit: 'kg' }
     },
     service: 'inpost_locker_standard'
-  }));
+  }))
 
-  // === 6) запрос расчёта ===
-  const calcRes = await fetch(
-    `https://api-shipx-eu.easypack24.net/v1/organizations/${process.env.SHIPX_ORGANIZATION_ID}/shipments/calculate`,
+  // POST /v1/organizations/{ORG_ID}/shipments/calculate
+  const ORG_ID = process.env.SHIPX_ORGANIZATION_ID
+  const resp = await fetch(
+    `https://api-shipx-eu.easypack24.net/v1/organizations/${ORG_ID}/shipments/calculate`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ shipments })
     }
-  );
-  if (!calcRes.ok) {
-    const err = await calcRes.text();
-    return res.status(502).json({ error: 'ShipX error', details: err });
+  )
+
+  if (!resp.ok) {
+    const text = await resp.text()
+    return res.status(500).json({ error: 'ShipX error', details: text })
   }
-  const offers = await calcRes.json();
 
-  // === 7) суммируем ===
+  const offers = await resp.json()
   const shippingCost = offers
-    .reduce((sum, o) => sum + parseFloat(o.calculated_charge_amount || 0), 0);
+    .reduce((sum, o) => sum + parseFloat(o.calculated_charge_amount||0), 0)
 
-  // === 8) отдаем клиенту ===
-  res.status(200).json({ shippingCost });
+  return res.status(200).json({ shippingCost })
 }

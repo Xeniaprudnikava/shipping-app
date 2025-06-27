@@ -2,83 +2,89 @@
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  // 1) Разрешаем CORS (для вашего сайта или всех)
+  // 1) CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  // 2) Preflight
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    return res.status(204).end();
   }
 
-  // 2) Только POST
+  // 3) Только POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // 3) Парсим тело запроса
   const { region, boxes } = req.body;
-  if (!region || !Number.isInteger(boxes) || boxes < 1) {
-    return res.status(400).json({ error: 'Nieprawidłowe dane' });
-  }
 
-  // 4) Маппинг регион → ISO
+  // 4) OAuth2-токен
+  const tokenRes = await fetch(
+    'https://api-shipx-eu.easypack24.net/oauth/token',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.SHIPX_CLIENT_ID,
+        client_secret: process.env.SHIPX_CLIENT_SECRET
+      })
+    }
+  );
+  if (!tokenRes.ok) {
+    console.error('Token fetch failed', await tokenRes.text());
+    return res.status(502).json({ error: 'Bad token response' });
+  }
+  const { access_token } = await tokenRes.json();
+
+  // 5) Маппинг регионов
   const countryCodes = {
     Polska: 'PL',
     Niemcy: 'DE',
     Litwa: 'LT',
     Holandia: 'NL',
     Włochy: 'IT',
-    'Wielka Brytania': 'GB',
+    'Wielka Brytania': 'GB'
   };
-  const country_code = countryCodes[region];
-  if (!country_code) {
-    return res.status(400).json({ error: 'Nieobsługiwany region' });
+  const code = countryCodes[region];
+  if (!code || !Number.isInteger(boxes) || boxes < 1) {
+    return res.status(400).json({ error: 'Nieprawidłowe dane' });
   }
 
-  // 5) Ваш токен из ENV
-  const TOKEN = process.env.SHIPX_API_TOKEN;
-  const ORG_ID = process.env.SHIPX_ORGANIZATION_ID;
-  if (!TOKEN || !ORG_ID) {
-    return res
-      .status(500)
-      .json({ error: 'Missing SHIPX_API_TOKEN or SHIPX_ORGANIZATION_ID' });
-  }
-
-  // 6) Строим shipments
+  // 6) Формируем shipments
   const shipments = Array.from({ length: boxes }, (_, i) => ({
     id: `BOX${i + 1}`,
-    receiver: { address: { country_code } },
+    receiver: { address: { country_code: code } },
     parcels: {
       dimensions: { length: '39', width: '38', height: '64', unit: 'cm' },
-      weight:     { amount: '1',  unit: 'kg' },
+      weight:     { amount: '1', unit: 'kg' }
     },
-    service: 'inpost_locker_standard',
+    service: 'inpost_locker_standard'
   }));
 
-  // 7) Делаем запрос расчёта
+  // 7) Запрашиваем расчёт
   const calcRes = await fetch(
-    `https://api-shipx-eu.easypack24.net/v1/organizations/${ORG_ID}/shipments/calculate`,
+    `https://api-shipx-eu.easypack24.net/v1/organizations/${process.env.SHIPX_ORGANIZATION_ID}/shipments/calculate`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'Content-Type': 'application/json',
+        Authorization: `Bearer ${access_token}`,
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ shipments }),
+      body: JSON.stringify({ shipments })
     }
   );
   if (!calcRes.ok) {
-    console.error('Calculation error', await calcRes.text());
-    return res.status(502).json({ error: 'Calculation failed' });
+    console.error('Calc fetch failed', await calcRes.text());
+    return res.status(502).json({ error: 'Bad calculate response' });
   }
   const offers = await calcRes.json();
 
-  // 8) Суммируем цену
-  const price = offers.reduce(
-    (sum, o) => sum + parseFloat(o.calculated_charge_amount || 0),
-    0
-  );
+  // 8) Суммируем
+  const shippingCost = offers
+    .reduce((sum, o) => sum + parseFloat(o.calculated_charge_amount || 0), 0);
 
-  // 9) Возвращаем результат
-  return res.status(200).json({ price });
+  // 9) Отправляем ответ
+  res.status(200).json({ shippingCost });
 }

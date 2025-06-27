@@ -2,43 +2,35 @@
 import fetch from 'node-fetch';
 
 export default async function handler(req, res) {
-  // 1) CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  // 2) Preflight
+  // 1) CORS preflight
   if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     return res.status(204).end();
   }
 
-  // 3) Только POST
+  // 2) Только POST
   if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST, OPTIONS');
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
+  // 3) Разрешаем запросы из любых доменов (или замените '*' на конкретный URL tilda)
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
   const { region, boxes } = req.body;
+  const orgId = process.env.SHIPX_ORGANIZATION_ID;
+  const token = process.env.SHIPX_TOKEN;
 
-  // 4) OAuth2-токен
-  const tokenRes = await fetch(
-    'https://api-shipx-eu.easypack24.net/oauth/token',
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: process.env.SHIPX_CLIENT_ID,
-        client_secret: process.env.SHIPX_CLIENT_SECRET
-      })
-    }
-  );
-  if (!tokenRes.ok) {
-    console.error('Token fetch failed', await tokenRes.text());
-    return res.status(502).json({ error: 'Bad token response' });
+  if (!orgId || !token) {
+    return res.status(500).json({ error: 'Missing environment variables' });
   }
-  const { access_token } = await tokenRes.json();
+  if (!region || !Number.isInteger(boxes) || boxes < 1) {
+    return res.status(400).json({ error: 'Invalid region or boxes' });
+  }
 
-  // 5) Маппинг регионов
+  // 4) Маппинг региона в ISO-код
   const countryCodes = {
     Polska: 'PL',
     Niemcy: 'DE',
@@ -48,11 +40,11 @@ export default async function handler(req, res) {
     'Wielka Brytania': 'GB'
   };
   const code = countryCodes[region];
-  if (!code || !Number.isInteger(boxes) || boxes < 1) {
-    return res.status(400).json({ error: 'Nieprawidłowe dane' });
+  if (!code) {
+    return res.status(400).json({ error: 'Unknown region' });
   }
 
-  // 6) Формируем shipments
+  // 5) Собираем массив отправлений
   const shipments = Array.from({ length: boxes }, (_, i) => ({
     id: `BOX${i + 1}`,
     receiver: { address: { country_code: code } },
@@ -63,28 +55,28 @@ export default async function handler(req, res) {
     service: 'inpost_locker_standard'
   }));
 
-  // 7) Запрашиваем расчёт
+  // 6) Запрос расчёта
   const calcRes = await fetch(
-    `https://api-shipx-eu.easypack24.net/v1/organizations/${process.env.SHIPX_ORGANIZATION_ID}/shipments/calculate`,
+    `https://api-shipx-eu.easypack24.net/v1/organizations/${orgId}/shipments/calculate`,
     {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${access_token}`,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({ shipments })
     }
   );
   if (!calcRes.ok) {
-    console.error('Calc fetch failed', await calcRes.text());
-    return res.status(502).json({ error: 'Bad calculate response' });
+    const err = await calcRes.text();
+    return res.status(calcRes.status).json({ error: err });
   }
   const offers = await calcRes.json();
 
-  // 8) Суммируем
+  // 7) Суммируем стоимость
   const shippingCost = offers
     .reduce((sum, o) => sum + parseFloat(o.calculated_charge_amount || 0), 0);
 
-  // 9) Отправляем ответ
-  res.status(200).json({ shippingCost });
+  // 8) Отдаём ответ
+  return res.status(200).json({ shippingCost });
 }

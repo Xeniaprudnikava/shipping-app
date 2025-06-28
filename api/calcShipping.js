@@ -41,7 +41,7 @@ export default async function handler(req, res) {
     }));
 
     const resp = await fetch(
-      `https://api-shipx-eu.easypack24.net/v1/organizations/${orgId}/shipments/calculate`,
+      `https://api-shipx-it.easypack24.net/v1/organizations/${orgId}/shipments/calculate`,
       {
         method: 'POST',
         headers: {

@@ -52,7 +52,7 @@ export default async function handler(req, res) {
 
     /* ----------- запрос в ShipX ----------- */
     const shipx = await fetch(
-      `https://api-shipx-it.easypack24.net/v1/organizations/${orgId}/shipments/calculate`,
+      `https://api-shipx-pl.easypack24.net/v1/organizations/${orgId}/shipments/calculate`,
       {
         method: 'POST',
         headers: {
